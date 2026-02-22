@@ -119,6 +119,10 @@ internal/
 Makefile                 Build, run, stress, test, clean targets with help menu
 ```
 
+## Why "Zigster"?
+
+My dog was here while I was building this. That's the whole story.
+
 ## License
 
 MIT
