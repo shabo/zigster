@@ -1,4 +1,6 @@
-package main
+// Package chart provides sparkline rendering with color-coded temperature
+// thresholds, minute tick marks, timeline labels, and threshold scale bars.
+package chart
 
 import (
 	"fmt"
@@ -6,12 +8,14 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/luki/sensors/internal/history"
 )
 
-var sparkBlocks = []rune{'▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'}
+var sparkBlocks = []rune{'\u2581', '\u2582', '\u2583', '\u2584', '\u2585', '\u2586', '\u2587', '\u2588'}
 
-// tempColor returns the appropriate color for a temperature value given thresholds.
-func tempColor(v, high, crit float64, hasHigh, hasCrit bool) lipgloss.Color {
+// TempColor returns the appropriate color for a temperature value given thresholds.
+func TempColor(v, high, crit float64, hasHigh, hasCrit bool) lipgloss.Color {
 	switch {
 	case hasCrit && v >= crit:
 		return lipgloss.Color("196") // red
@@ -30,24 +34,23 @@ func RenderSparkline(values []float64, width int, rangeMin, rangeMax float64, hi
 	if width <= 0 {
 		return ""
 	}
-	// Convert to points without timestamps (no tick marks)
-	pts := make([]HistoryPoint, len(values))
+	pts := make([]history.Point, len(values))
 	for i, v := range values {
-		pts[i] = HistoryPoint{Temp: v}
+		pts[i] = history.Point{Temp: v}
 	}
 	return RenderSparklinePoints(pts, width, rangeMin, rangeMax, high, crit, hasHigh, hasCrit)
 }
 
 // RenderSparklinePoints renders a sparkline with minute tick marks on the
-// timeline. A subtle '|' is drawn at each minute boundary.
-func RenderSparklinePoints(points []HistoryPoint, width int, rangeMin, rangeMax float64, high, crit float64, hasHigh, hasCrit bool) string {
+// timeline. A subtle pipe is drawn at each minute boundary.
+func RenderSparklinePoints(points []history.Point, width int, rangeMin, rangeMax float64, high, crit float64, hasHigh, hasCrit bool) string {
 	if width <= 0 {
 		return ""
 	}
 
 	if len(points) == 0 {
 		dim := lipgloss.NewStyle().Foreground(lipgloss.Color("236"))
-		return dim.Render(strings.Repeat("╌", width))
+		return dim.Render(strings.Repeat("\u254C", width))
 	}
 
 	if len(points) > width {
@@ -64,7 +67,7 @@ func RenderSparklinePoints(points []HistoryPoint, width int, rangeMin, rangeMax 
 
 	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("236"))
 	for i := 0; i < padLen; i++ {
-		sb.WriteString(dim.Render("╌"))
+		sb.WriteString(dim.Render("\u254C"))
 	}
 
 	tickStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("239"))
@@ -78,9 +81,6 @@ func RenderSparklinePoints(points []HistoryPoint, width int, rangeMin, rangeMax 
 			idx = 7
 		}
 
-		// Check if this point is at a minute boundary:
-		// The second of this point's time is 0, OR the previous point was
-		// in a different minute.
 		isMinuteTick := false
 		if !p.Time.IsZero() {
 			if p.Time.Second() == 0 {
@@ -93,11 +93,10 @@ func RenderSparklinePoints(points []HistoryPoint, width int, rangeMin, rangeMax 
 		}
 
 		if isMinuteTick {
-			// Draw a tick mark character — use a thin pipe that's subtle
-			sb.WriteString(tickStyle.Render("│"))
+			sb.WriteString(tickStyle.Render("\u2502"))
 		} else {
 			ch := string(sparkBlocks[idx])
-			color := tempColor(p.Temp, high, crit, hasHigh, hasCrit)
+			color := TempColor(p.Temp, high, crit, hasHigh, hasCrit)
 			style := lipgloss.NewStyle().Foreground(color)
 			if hasCrit && p.Temp >= crit {
 				style = style.Bold(true)
@@ -111,7 +110,7 @@ func RenderSparklinePoints(points []HistoryPoint, width int, rangeMin, rangeMax 
 
 // RenderTimeline renders the time labels under the sparkline, showing
 // HH:MM at each minute tick position.
-func RenderTimeline(points []HistoryPoint, width int) string {
+func RenderTimeline(points []history.Point, width int) string {
 	if len(points) == 0 || width <= 0 {
 		return ""
 	}
@@ -122,7 +121,6 @@ func RenderTimeline(points []HistoryPoint, width int) string {
 
 	padLen := width - len(points)
 
-	// Build a rune buffer for the timeline
 	line := make([]rune, width)
 	for i := range line {
 		line[i] = ' '
@@ -130,7 +128,6 @@ func RenderTimeline(points []HistoryPoint, width int) string {
 
 	tickStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("239"))
 
-	// Collect tick positions and their labels
 	type tick struct {
 		pos   int
 		label string
@@ -156,10 +153,9 @@ func RenderTimeline(points []HistoryPoint, width int) string {
 		}
 	}
 
-	// Place labels, skipping if they'd overlap (need at least 6 chars apart)
 	lastEnd := -1
 	for _, t := range ticks {
-		start := t.pos - 2 // center the 5-char label
+		start := t.pos - 2
 		if start < 0 {
 			start = 0
 		}
@@ -168,7 +164,7 @@ func RenderTimeline(points []HistoryPoint, width int) string {
 			continue
 		}
 		if start <= lastEnd+1 {
-			continue // too close to previous label
+			continue
 		}
 		for j, ch := range t.label {
 			line[start+j] = ch
@@ -176,7 +172,6 @@ func RenderTimeline(points []HistoryPoint, width int) string {
 		lastEnd = end
 	}
 
-	// Render with dim style
 	result := string(line)
 	return tickStyle.Render(result)
 }
@@ -194,19 +189,19 @@ func RenderThresholdScale(current, rangeMin, rangeMax, high, crit float64, hasHi
 
 	bar := make([]rune, width)
 	for i := range bar {
-		bar[i] = '·'
+		bar[i] = '\u00B7'
 	}
 
 	if hasHigh && high > rangeMin {
 		pos := int(float64(width-1) * (high - rangeMin) / span)
 		if pos >= 0 && pos < width {
-			bar[pos] = '▪'
+			bar[pos] = '\u25AA'
 		}
 	}
 	if hasCrit && crit > rangeMin {
 		pos := int(float64(width-1) * (crit - rangeMin) / span)
 		if pos >= 0 && pos < width {
-			bar[pos] = '▪'
+			bar[pos] = '\u25AA'
 		}
 	}
 
@@ -221,10 +216,10 @@ func RenderThresholdScale(current, rangeMin, rangeMax, high, crit float64, hasHi
 	var sb strings.Builder
 	for i, ch := range bar {
 		if i == curPos {
-			color := tempColor(current, high, crit, hasHigh, hasCrit)
+			color := TempColor(current, high, crit, hasHigh, hasCrit)
 			style := lipgloss.NewStyle().Foreground(color).Bold(true)
-			sb.WriteString(style.Render("◆"))
-		} else if ch == '▪' {
+			sb.WriteString(style.Render("\u25C6"))
+		} else if ch == '\u25AA' {
 			highPos := -1
 			critPos := -1
 			if hasHigh && high > rangeMin {
@@ -234,11 +229,11 @@ func RenderThresholdScale(current, rangeMin, rangeMax, high, crit float64, hasHi
 				critPos = int(float64(width-1) * (crit - rangeMin) / span)
 			}
 			if i == critPos {
-				sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("▪"))
+				sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("\u25AA"))
 			} else if i == highPos {
-				sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Render("▪"))
+				sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Render("\u25AA"))
 			} else {
-				sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("▪"))
+				sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("\u25AA"))
 			}
 		} else {
 			sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("236")).Render(string(ch)))
@@ -250,8 +245,8 @@ func RenderThresholdScale(current, rangeMin, rangeMax, high, crit float64, hasHi
 
 // RenderTempValue renders the temperature value with color coding.
 func RenderTempValue(temp, high, crit float64, hasHigh, hasCrit bool) string {
-	s := fmt.Sprintf("%5.1f°C", temp)
-	color := tempColor(temp, high, crit, hasHigh, hasCrit)
+	s := fmt.Sprintf("%5.1f\u00B0C", temp)
+	color := TempColor(temp, high, crit, hasHigh, hasCrit)
 	style := lipgloss.NewStyle().Foreground(color)
 	if hasCrit && temp >= crit {
 		style = style.Bold(true)

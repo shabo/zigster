@@ -1,4 +1,6 @@
-package main
+// Package store handles persistent CSV storage of temperature readings
+// with daily file rotation. Data is stored in ~/.sensors-data/.
+package store
 
 import (
 	"encoding/csv"
@@ -8,10 +10,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/luki/sensors/internal/sensor"
 )
 
 const (
-	storeDir   = ".sensors-data"
+	dirName    = ".sensors-data"
 	timeLayout = "2006-01-02T15:04:05"
 	fileLayout = "2006-01-02"
 )
@@ -37,13 +41,13 @@ type StoredReading struct {
 	Crit  float64
 }
 
-// NewDiskStore creates a new disk store, creating the data directory if needed.
-func NewDiskStore() (*DiskStore, error) {
+// New creates a new disk store, creating the data directory if needed.
+func New() (*DiskStore, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("cannot find home dir: %w", err)
 	}
-	dir := filepath.Join(home, storeDir)
+	dir := filepath.Join(home, dirName)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("cannot create data dir: %w", err)
 	}
@@ -51,10 +55,9 @@ func NewDiskStore() (*DiskStore, error) {
 }
 
 // Write appends a batch of sensor readings to today's CSV file.
-func (d *DiskStore) Write(readings []SensorReading, t time.Time) error {
+func (d *DiskStore) Write(readings []sensor.Reading, t time.Time) error {
 	dateStr := t.Format(fileLayout)
 
-	// Rotate file on date change
 	if d.curDate != dateStr || d.current == nil {
 		d.Close()
 		path := filepath.Join(d.dir, dateStr+".csv")
@@ -66,7 +69,6 @@ func (d *DiskStore) Write(readings []SensorReading, t time.Time) error {
 		d.writer = csv.NewWriter(f)
 		d.curDate = dateStr
 
-		// Write header if file is new (empty)
 		info, _ := f.Stat()
 		if info.Size() == 0 {
 			d.writer.Write([]string{"time", "chip", "label", "temp", "high", "crit"})
@@ -106,7 +108,7 @@ func ListDays(dir string) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		dir = filepath.Join(home, storeDir)
+		dir = filepath.Join(home, dirName)
 	}
 
 	entries, err := os.ReadDir(dir)
@@ -130,7 +132,7 @@ func LoadDay(day string) ([]StoredReading, error) {
 	if err != nil {
 		return nil, err
 	}
-	path := filepath.Join(home, storeDir, day+".csv")
+	path := filepath.Join(home, dirName, day+".csv")
 	return LoadFile(path)
 }
 
@@ -150,7 +152,6 @@ func LoadFile(path string) ([]StoredReading, error) {
 
 	var readings []StoredReading
 	for i, row := range records {
-		// Skip header
 		if i == 0 && len(row) > 0 && row[0] == "time" {
 			continue
 		}
@@ -182,5 +183,5 @@ func LoadFile(path string) ([]StoredReading, error) {
 // DataDir returns the path to the data directory.
 func DataDir() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, storeDir)
+	return filepath.Join(home, dirName)
 }

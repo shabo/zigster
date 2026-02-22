@@ -1,15 +1,21 @@
-package main
+// Package monitor implements the live temperature monitoring TUI using
+// BubbleTea with real-time sparkline charts and color-coded thresholds.
+package monitor
 
 import (
 	"fmt"
 	"math"
-	"os"
 	"sort"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/luki/sensors/internal/chart"
+	"github.com/luki/sensors/internal/history"
+	"github.com/luki/sensors/internal/sensor"
+	"github.com/luki/sensors/internal/store"
 )
 
 const (
@@ -22,7 +28,7 @@ const (
 type tickMsg time.Time
 
 type sensorDataMsg struct {
-	readings []SensorReading
+	readings []sensor.Reading
 	time     time.Time
 }
 
@@ -32,10 +38,11 @@ func (e errMsg) Error() string { return e.err.Error() }
 
 // ── Model ────────────────────────────────────────────────────────────
 
-type model struct {
-	readings  []SensorReading
-	history   *HistoryStore
-	store     *DiskStore
+// Model is the BubbleTea model for the live monitor.
+type Model struct {
+	readings  []sensor.Reading
+	history   *history.Store
+	store     *store.DiskStore
 	order     []string
 	err       error
 	width     int
@@ -46,11 +53,12 @@ type model struct {
 	paused    bool
 }
 
-func initialModel() model {
-	store, err := NewDiskStore()
-	m := model{
-		history:   NewHistoryStore(historySize),
-		store:     store,
+// New creates the initial model for the live monitor.
+func New() Model {
+	ds, err := store.New()
+	m := Model{
+		history:   history.NewStore(historySize),
+		store:     ds,
 		startTime: time.Now(),
 	}
 	if err != nil {
@@ -68,7 +76,7 @@ func tickCmd() tea.Cmd {
 }
 
 func pollSensors() tea.Msg {
-	readings, err := ReadSensors()
+	readings, err := sensor.ReadAll()
 	if err != nil {
 		return errMsg{err}
 	}
@@ -77,11 +85,11 @@ func pollSensors() tea.Msg {
 
 // ── Init / Update ────────────────────────────────────────────────────
 
-func (m model) Init() tea.Cmd {
+func (m Model) Init() tea.Cmd {
 	return tea.Batch(pollSensors, tickCmd())
 }
 
-func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 
 	case tea.KeyMsg:
@@ -121,7 +129,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.order = buildOrder(m.readings, m.order)
 
-		// Persist to disk
 		if m.store != nil {
 			if err := m.store.Write(msg.readings, msg.time); err != nil {
 				m.err = fmt.Errorf("write: %w", err)
@@ -136,7 +143,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func buildOrder(readings []SensorReading, existing []string) []string {
+func buildOrder(readings []sensor.Reading, existing []string) []string {
 	seen := make(map[string]bool)
 	for _, k := range existing {
 		seen[k] = true
@@ -156,24 +163,24 @@ func buildOrder(readings []SensorReading, existing []string) []string {
 // ── Color palette ────────────────────────────────────────────────────
 
 var (
-	colorTitleBg  = lipgloss.Color("17")  // deep blue
-	colorTitleFg  = lipgloss.Color("51")  // bright cyan
-	colorBorder   = lipgloss.Color("62")  // muted blue/purple
-	colorChipName = lipgloss.Color("147") // light periwinkle
-	colorAdapter  = lipgloss.Color("243") // gray
-	colorLabel    = lipgloss.Color("252") // bright white-ish
-	colorDim      = lipgloss.Color("240") // dim gray
-	colorFooterBg = lipgloss.Color("235") // slightly lighter bg
-	colorOk       = lipgloss.Color("78")  // soft green
-	colorWarn     = lipgloss.Color("220") // yellow
-	colorHigh     = lipgloss.Color("208") // orange
-	colorCrit     = lipgloss.Color("196") // red
-	colorPaused   = lipgloss.Color("196") // red
+	colorTitleBg  = lipgloss.Color("17")
+	colorTitleFg  = lipgloss.Color("51")
+	colorBorder   = lipgloss.Color("62")
+	colorChipName = lipgloss.Color("147")
+	colorAdapter  = lipgloss.Color("243")
+	colorLabel    = lipgloss.Color("252")
+	colorDim      = lipgloss.Color("240")
+	colorFooterBg = lipgloss.Color("235")
+	colorOk       = lipgloss.Color("78")
+	colorWarn     = lipgloss.Color("220")
+	colorHigh     = lipgloss.Color("208")
+	colorCrit     = lipgloss.Color("196")
+	colorPaused   = lipgloss.Color("196")
 )
 
 // ── View ─────────────────────────────────────────────────────────────
 
-func (m model) View() string {
+func (m Model) View() string {
 	if m.width == 0 {
 		return "  Initializing..."
 	}
@@ -236,7 +243,7 @@ func (m model) View() string {
 	return strings.Join(lines[start:end], "\n")
 }
 
-func (m model) renderTitleBar(width int) string {
+func (m Model) renderTitleBar(width int) string {
 	logo := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(colorTitleFg).
@@ -264,18 +271,17 @@ func (m model) renderTitleBar(width int) string {
 		statusParts = append(statusParts, p)
 	}
 
-	// Recording indicator
 	if m.store != nil {
 		rec := lipgloss.NewStyle().
 			Foreground(lipgloss.Color("196")).
 			Render("REC") +
 			lipgloss.NewStyle().
 				Foreground(colorDim).
-				Render(" "+DataDir())
+				Render(" "+store.DataDir())
 		statusParts = append(statusParts, rec)
 	}
 
-	sep := lipgloss.NewStyle().Foreground(colorDim).Render(" │ ")
+	sep := lipgloss.NewStyle().Foreground(colorDim).Render(" \u2502 ")
 	right := strings.Join(statusParts, sep)
 
 	gap := width - lipgloss.Width(logo) - lipgloss.Width(right) - 4
@@ -291,11 +297,11 @@ func (m model) renderTitleBar(width int) string {
 		Render(logo + filler + right)
 }
 
-func (m model) renderSensorPanels(totalWidth int) []string {
+func (m Model) renderSensorPanels(totalWidth int) []string {
 	type chipGroup struct {
 		chip     string
 		adapter  string
-		readings []SensorReading
+		readings []sensor.Reading
 	}
 	chipMap := make(map[string]*chipGroup)
 	var chipOrder []string
@@ -328,8 +334,8 @@ func (m model) renderSensorPanels(totalWidth int) []string {
 
 	dimS := lipgloss.NewStyle().Foreground(colorDim)
 	valS := lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
-	frameL := lipgloss.NewStyle().Foreground(colorBorder).Render("▕")
-	frameR := lipgloss.NewStyle().Foreground(colorBorder).Render("▏")
+	frameL := lipgloss.NewStyle().Foreground(colorBorder).Render("\u2595")
+	frameR := lipgloss.NewStyle().Foreground(colorBorder).Render("\u258F")
 
 	var panels []string
 
@@ -338,8 +344,7 @@ func (m model) renderSensorPanels(totalWidth int) []string {
 
 		var rows []string
 
-		// Compact chip header: "CPU  coretemp-isa-0000  ISA adapter  sensor  current  ──history──"
-		friendly := ChipFriendlyName(g.chip)
+		friendly := sensor.FriendlyName(g.chip)
 		friendlyText := lipgloss.NewStyle().
 			Bold(true).
 			Foreground(colorChipName).
@@ -352,8 +357,7 @@ func (m model) renderSensorPanels(totalWidth int) []string {
 			Render(g.adapter)
 		rows = append(rows, friendlyText+"  "+chipID+"  "+adapterText)
 
-		// One shared timeline for the group at the top of the chart area
-		var lastPts []HistoryPoint
+		var lastPts []history.Point
 
 		for _, r := range g.readings {
 			hist := m.history.Get(r.Key())
@@ -378,11 +382,11 @@ func (m model) renderSensorPanels(totalWidth int) []string {
 			temp := lipgloss.NewStyle().
 				Width(tempW).
 				Align(lipgloss.Right).
-				Render(RenderTempValue(r.Temp, r.High, r.Crit, r.HasHigh, r.HasCrit))
+				Render(chart.RenderTempValue(r.Temp, r.High, r.Crit, r.HasHigh, r.HasCrit))
 
 			pts := hist.LastNPoints(chartWidth)
-			lastPts = pts // keep for the shared timeline
-			spark := RenderSparklinePoints(pts, chartWidth, rangeMin, rangeMax, r.High, r.Crit, r.HasHigh, r.HasCrit)
+			lastPts = pts
+			spark := chart.RenderSparklinePoints(pts, chartWidth, rangeMin, rangeMax, r.High, r.Crit, r.HasHigh, r.HasCrit)
 			framedSpark := frameL + spark + frameR
 
 			stats := dimS.Render(" avg") + valS.Render(fmt.Sprintf("%5.1f", hist.Avg())) +
@@ -401,9 +405,8 @@ func (m model) renderSensorPanels(totalWidth int) []string {
 			rows = append(rows, row)
 		}
 
-		// Shared timeline at the bottom of the panel
 		if lastPts != nil {
-			timeline := RenderTimeline(lastPts, chartWidth)
+			timeline := chart.RenderTimeline(lastPts, chartWidth)
 			if strings.TrimSpace(timeline) != "" {
 				pad := strings.Repeat(" ", labelW+tempW+2)
 				rows = append(rows, pad+" "+timeline)
@@ -424,12 +427,12 @@ func (m model) renderSensorPanels(totalWidth int) []string {
 	return panels
 }
 
-func (m model) renderFooter(width int) string {
-	okS := lipgloss.NewStyle().Foreground(colorOk).Render("██")
-	warnS := lipgloss.NewStyle().Foreground(colorWarn).Render("██")
-	highS := lipgloss.NewStyle().Foreground(colorHigh).Render("██")
-	critS := lipgloss.NewStyle().Foreground(colorCrit).Render("██")
-	tickS := lipgloss.NewStyle().Foreground(lipgloss.Color("239")).Render("│")
+func (m Model) renderFooter(width int) string {
+	okS := lipgloss.NewStyle().Foreground(colorOk).Render("\u2588\u2588")
+	warnS := lipgloss.NewStyle().Foreground(colorWarn).Render("\u2588\u2588")
+	highS := lipgloss.NewStyle().Foreground(colorHigh).Render("\u2588\u2588")
+	critS := lipgloss.NewStyle().Foreground(colorCrit).Render("\u2588\u2588")
+	tickS := lipgloss.NewStyle().Foreground(lipgloss.Color("239")).Render("\u2502")
 
 	dimS := lipgloss.NewStyle().Foreground(colorDim)
 	legend := okS + dimS.Render(" ok ") +
@@ -462,7 +465,7 @@ func truncate(s string, w int) string {
 	if w <= 3 {
 		return s[:w]
 	}
-	return s[:w-1] + "…"
+	return s[:w-1] + "\u2026"
 }
 
 func fmtDuration(d time.Duration) string {
@@ -476,30 +479,4 @@ func fmtDuration(d time.Duration) string {
 		return fmt.Sprintf("%dh%02dm%02ds", h, m, s)
 	}
 	return fmt.Sprintf("%dm%02ds", m, s)
-}
-
-// ── Main ─────────────────────────────────────────────────────────────
-
-func main() {
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "--history", "history":
-			runHistoryViewer()
-			return
-		case "stress":
-			runStress(os.Args[2:])
-			return
-		}
-	}
-
-	p := tea.NewProgram(
-		initialModel(),
-		tea.WithAltScreen(),
-		tea.WithMouseCellMotion(),
-	)
-
-	if _, err := p.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
 }

@@ -1,4 +1,6 @@
-package main
+// Package viewer implements the historical temperature data browser TUI
+// with time scrubbing, day navigation, and sparkline windows.
+package viewer
 
 import (
 	"fmt"
@@ -10,20 +12,23 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/luki/sensors/internal/chart"
+	"github.com/luki/sensors/internal/history"
+	"github.com/luki/sensors/internal/sensor"
+	"github.com/luki/sensors/internal/store"
 )
 
-// ── History Viewer ───────────────────────────────────────────────────
-
-// runHistoryViewer launches the historical data viewer TUI.
-func runHistoryViewer() {
-	days, err := ListDays("")
+// Run launches the historical data viewer TUI.
+func Run() {
+	days, err := store.ListDays("")
 	if err != nil || len(days) == 0 {
-		fmt.Fprintf(os.Stderr, "No history data found in %s\n", DataDir())
+		fmt.Fprintf(os.Stderr, "No history data found in %s\n", store.DataDir())
 		os.Exit(1)
 	}
 
 	p := tea.NewProgram(
-		initViewerModel(days),
+		initModel(days),
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 	)
@@ -34,20 +39,33 @@ func runHistoryViewer() {
 	}
 }
 
-// ── Viewer Model ─────────────────────────────────────────────────────
+// ── Color palette ────────────────────────────────────────────────────
 
-type viewerModel struct {
-	days     []string        // available dates
-	dayIdx   int             // currently selected day
-	readings []StoredReading // all readings for current day
-	sensors  []string        // unique sensor keys (sorted)
-	cursor   int             // time cursor position (index into time slots)
-	scroll   int             // vertical scroll offset
+var (
+	colorTitleBg  = lipgloss.Color("17")
+	colorTitleFg  = lipgloss.Color("51")
+	colorBorder   = lipgloss.Color("62")
+	colorChipName = lipgloss.Color("147")
+	colorLabel    = lipgloss.Color("252")
+	colorDim      = lipgloss.Color("240")
+	colorFooterBg = lipgloss.Color("235")
+	colorWarn     = lipgloss.Color("220")
+	colorCrit     = lipgloss.Color("196")
+)
+
+// ── Model ────────────────────────────────────────────────────────────
+
+type model struct {
+	days     []string              // available dates
+	dayIdx   int                   // currently selected day
+	readings []store.StoredReading // all readings for current day
+	sensors  []string              // unique sensor keys (sorted)
+	cursor   int                   // time cursor position
+	scroll   int                   // vertical scroll offset
 	width    int
 	height   int
 	err      error
 
-	// Derived from readings
 	timeSlots  []time.Time            // unique timestamps (sorted)
 	series     map[string][]dataPoint // sensor key -> sorted data points
 	thresholds map[string][2]float64  // sensor key -> [high, crit]
@@ -58,8 +76,8 @@ type dataPoint struct {
 	temp float64
 }
 
-func initViewerModel(days []string) viewerModel {
-	m := viewerModel{
+func initModel(days []string) model {
+	m := model{
 		days:   days,
 		dayIdx: 0,
 	}
@@ -67,9 +85,9 @@ func initViewerModel(days []string) viewerModel {
 	return m
 }
 
-func (m *viewerModel) loadDay() {
+func (m *model) loadDay() {
 	day := m.days[m.dayIdx]
-	readings, err := LoadDay(day)
+	readings, err := store.LoadDay(day)
 	if err != nil {
 		m.err = err
 		return
@@ -77,7 +95,6 @@ func (m *viewerModel) loadDay() {
 	m.readings = readings
 	m.err = nil
 
-	// Build time slots and series
 	timeSet := make(map[int64]time.Time)
 	seriesMap := make(map[string][]dataPoint)
 	threshMap := make(map[string][2]float64)
@@ -94,7 +111,6 @@ func (m *viewerModel) loadDay() {
 		}
 	}
 
-	// Sort sensors
 	var sensors []string
 	for k := range sensorSet {
 		sensors = append(sensors, k)
@@ -102,7 +118,6 @@ func (m *viewerModel) loadDay() {
 	sort.Strings(sensors)
 	m.sensors = sensors
 
-	// Sort time slots
 	var times []time.Time
 	for _, t := range timeSet {
 		times = append(times, t)
@@ -110,7 +125,6 @@ func (m *viewerModel) loadDay() {
 	sort.Slice(times, func(i, j int) bool { return times[i].Before(times[j]) })
 	m.timeSlots = times
 
-	// Sort each series by time
 	for k, pts := range seriesMap {
 		sort.Slice(pts, func(i, j int) bool { return pts[i].time.Before(pts[j].time) })
 		seriesMap[k] = pts
@@ -118,20 +132,19 @@ func (m *viewerModel) loadDay() {
 	m.series = seriesMap
 	m.thresholds = threshMap
 
-	// Start cursor at the end
 	if len(m.timeSlots) > 0 {
 		m.cursor = len(m.timeSlots) - 1
 	}
 	m.scroll = 0
 }
 
-// ── Viewer Init / Update ─────────────────────────────────────────────
+// ── Init / Update ────────────────────────────────────────────────────
 
-func (m viewerModel) Init() tea.Cmd {
+func (m model) Init() tea.Cmd {
 	return nil
 }
 
-func (m viewerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 
 	case tea.KeyMsg:
@@ -139,7 +152,6 @@ func (m viewerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "q", "ctrl+c":
 			return m, tea.Quit
 
-		// Time navigation
 		case "left", "h":
 			if m.cursor > 0 {
 				m.cursor--
@@ -165,7 +177,6 @@ func (m viewerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cursor = len(m.timeSlots) - 1
 			}
 
-		// Day navigation
 		case "[":
 			if m.dayIdx < len(m.days)-1 {
 				m.dayIdx++
@@ -177,7 +188,6 @@ func (m viewerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.loadDay()
 			}
 
-		// Scroll
 		case "up", "k":
 			if m.scroll > 0 {
 				m.scroll--
@@ -194,9 +204,9 @@ func (m viewerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// ── Viewer View ──────────────────────────────────────────────────────
+// ── View ─────────────────────────────────────────────────────────────
 
-func (m viewerModel) View() string {
+func (m model) View() string {
 	if m.width == 0 {
 		return "  Loading..."
 	}
@@ -208,8 +218,7 @@ func (m viewerModel) View() string {
 
 	var sections []string
 
-	// Title bar
-	sections = append(sections, m.renderViewerTitle(contentWidth))
+	sections = append(sections, m.renderTitle(contentWidth))
 
 	if m.err != nil {
 		errBox := lipgloss.NewStyle().
@@ -229,20 +238,15 @@ func (m viewerModel) View() string {
 			Render("No data for this day.")
 		sections = append(sections, empty)
 	} else {
-		// Time cursor info
 		sections = append(sections, m.renderCursorInfo(contentWidth))
-
-		// Sensor panels
-		panels := m.renderViewerPanels(contentWidth)
+		panels := m.renderPanels(contentWidth)
 		sections = append(sections, panels...)
 	}
 
-	// Footer
-	sections = append(sections, m.renderViewerFooter(contentWidth))
+	sections = append(sections, m.renderFooter(contentWidth))
 
 	content := lipgloss.JoinVertical(lipgloss.Left, sections...)
 
-	// Scroll
 	lines := strings.Split(content, "\n")
 	visibleLines := m.height
 	if visibleLines < 5 {
@@ -265,7 +269,7 @@ func (m viewerModel) View() string {
 	return strings.Join(lines[start:end], "\n")
 }
 
-func (m viewerModel) renderViewerTitle(width int) string {
+func (m model) renderTitle(width int) string {
 	logo := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(colorTitleFg).
@@ -306,7 +310,7 @@ func (m viewerModel) renderViewerTitle(width int) string {
 		Render(logo + filler + right)
 }
 
-func (m viewerModel) renderCursorInfo(width int) string {
+func (m model) renderCursorInfo(width int) string {
 	if m.cursor < 0 || m.cursor >= len(m.timeSlots) {
 		return ""
 	}
@@ -321,7 +325,6 @@ func (m viewerModel) renderCursorInfo(width int) string {
 		Foreground(colorDim).
 		Render(fmt.Sprintf("  %d/%d", m.cursor+1, len(m.timeSlots)))
 
-	// Mini scrubber bar
 	barWidth := width - 30
 	if barWidth < 10 {
 		barWidth = 10
@@ -333,17 +336,11 @@ func (m viewerModel) renderCursorInfo(width int) string {
 		Render("  " + ts + pos + "  " + scrubber)
 }
 
-func (m viewerModel) renderScrubber(width int) string {
+func (m model) renderScrubber(width int) string {
 	if len(m.timeSlots) == 0 || width <= 0 {
 		return ""
 	}
 
-	bar := make([]rune, width)
-	for i := range bar {
-		bar[i] = '─'
-	}
-
-	// Position cursor
 	pos := 0
 	if len(m.timeSlots) > 1 {
 		pos = m.cursor * (width - 1) / (len(m.timeSlots) - 1)
@@ -357,11 +354,10 @@ func (m viewerModel) renderScrubber(width int) string {
 	curS := lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
 	tickS := lipgloss.NewStyle().Foreground(lipgloss.Color("239"))
 
-	for i := range bar {
+	for i := 0; i < width; i++ {
 		if i == pos {
-			sb.WriteString(curS.Render("◆"))
+			sb.WriteString(curS.Render("\u25C6"))
 		} else {
-			// Mark hour boundaries
 			slotIdx := 0
 			if len(m.timeSlots) > 1 {
 				slotIdx = i * (len(m.timeSlots) - 1) / (width - 1)
@@ -370,18 +366,18 @@ func (m viewerModel) renderScrubber(width int) string {
 				t := m.timeSlots[slotIdx]
 				tPrev := m.timeSlots[slotIdx-1]
 				if t.Hour() != tPrev.Hour() {
-					sb.WriteString(tickS.Render("│"))
+					sb.WriteString(tickS.Render("\u2502"))
 					continue
 				}
 			}
-			sb.WriteString(dimS.Render("─"))
+			sb.WriteString(dimS.Render("\u2500"))
 		}
 	}
 
 	return sb.String()
 }
 
-func (m viewerModel) renderViewerPanels(totalWidth int) []string {
+func (m model) renderPanels(totalWidth int) []string {
 	if m.cursor < 0 || m.cursor >= len(m.timeSlots) {
 		return nil
 	}
@@ -404,7 +400,6 @@ func (m viewerModel) renderViewerPanels(totalWidth int) []string {
 	labelW := 16
 	tempW := 8
 
-	// Group sensors by chip
 	type chipGroup struct {
 		chip    string
 		sensors []string
@@ -431,7 +426,7 @@ func (m viewerModel) renderViewerPanels(totalWidth int) []string {
 
 		var rows []string
 
-		friendly := ChipFriendlyName(g.chip)
+		friendly := sensor.FriendlyName(g.chip)
 		friendlyText := lipgloss.NewStyle().
 			Bold(true).
 			Foreground(colorChipName).
@@ -449,7 +444,7 @@ func (m viewerModel) renderViewerPanels(totalWidth int) []string {
 
 		sep := lipgloss.NewStyle().
 			Foreground(lipgloss.Color("237")).
-			Render(strings.Repeat("─", innerWidth))
+			Render(strings.Repeat("\u2500", innerWidth))
 		rows = append(rows, sep)
 
 		for _, key := range g.sensors {
@@ -469,10 +464,8 @@ func (m viewerModel) renderViewerPanels(totalWidth int) []string {
 			hasHigh := high > 0
 			hasCrit := crit > 0
 
-			// Find temp at cursor time
 			curTemp := findTempAtTime(pts, cursorTime)
 
-			// Compute range
 			minV, maxV := math.MaxFloat64, -math.MaxFloat64
 			for _, p := range pts {
 				if p.temp < minV {
@@ -491,7 +484,6 @@ func (m viewerModel) renderViewerPanels(totalWidth int) []string {
 				rangeMax = high + 5
 			}
 
-			// Build sparkline — show the window around the cursor
 			sparkPts := buildSparkWindow(pts, m.cursor, chartWidth, m.timeSlots)
 
 			label := lipgloss.NewStyle().
@@ -503,15 +495,14 @@ func (m viewerModel) renderViewerPanels(totalWidth int) []string {
 			temp := lipgloss.NewStyle().
 				Width(tempW).
 				Align(lipgloss.Right).
-				Render(RenderTempValue(curTemp, high, crit, hasHigh, hasCrit))
+				Render(chart.RenderTempValue(curTemp, high, crit, hasHigh, hasCrit))
 
-			spark := RenderSparklinePoints(sparkPts, chartWidth, rangeMin, rangeMax, high, crit, hasHigh, hasCrit)
+			spark := chart.RenderSparklinePoints(sparkPts, chartWidth, rangeMin, rangeMax, high, crit, hasHigh, hasCrit)
 
-			frameL := lipgloss.NewStyle().Foreground(colorBorder).Render("▕")
-			frameR := lipgloss.NewStyle().Foreground(colorBorder).Render("▏")
+			frameL := lipgloss.NewStyle().Foreground(colorBorder).Render("\u2595")
+			frameR := lipgloss.NewStyle().Foreground(colorBorder).Render("\u258F")
 			framedSpark := frameL + spark + frameR
 
-			// Stats for full day
 			avg := 0.0
 			for _, p := range pts {
 				avg += p.temp
@@ -526,17 +517,16 @@ func (m viewerModel) renderViewerPanels(totalWidth int) []string {
 
 			var threshTags string
 			if hasHigh {
-				threshTags += " " + lipgloss.NewStyle().Foreground(colorWarn).Render(fmt.Sprintf("H:%.0f°", high))
+				threshTags += " " + lipgloss.NewStyle().Foreground(colorWarn).Render(fmt.Sprintf("H:%.0f\u00B0", high))
 			}
 			if hasCrit {
-				threshTags += " " + lipgloss.NewStyle().Foreground(colorCrit).Render(fmt.Sprintf("C:%.0f°", crit))
+				threshTags += " " + lipgloss.NewStyle().Foreground(colorCrit).Render(fmt.Sprintf("C:%.0f\u00B0", crit))
 			}
 
 			row := label + " " + temp + " " + framedSpark + " " + stats + threshTags
 			rows = append(rows, row)
 
-			// Timeline
-			timeline := RenderTimeline(sparkPts, chartWidth)
+			timeline := chart.RenderTimeline(sparkPts, chartWidth)
 			if strings.TrimSpace(timeline) != "" {
 				pad := strings.Repeat(" ", labelW+tempW+2)
 				rows = append(rows, pad+" "+timeline)
@@ -557,7 +547,7 @@ func (m viewerModel) renderViewerPanels(totalWidth int) []string {
 	return panels
 }
 
-func (m viewerModel) renderViewerFooter(width int) string {
+func (m model) renderFooter(width int) string {
 	dimS := lipgloss.NewStyle().Foreground(colorDim)
 	keyS := lipgloss.NewStyle().Foreground(colorLabel)
 
@@ -577,9 +567,7 @@ func (m viewerModel) renderViewerFooter(width int) string {
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-// findTempAtTime finds the temperature closest to the given time.
 func findTempAtTime(pts []dataPoint, t time.Time) float64 {
-	// Binary search for closest
 	best := pts[0].temp
 	bestDiff := absDuration(pts[0].time.Sub(t))
 	for _, p := range pts {
@@ -589,7 +577,7 @@ func findTempAtTime(pts []dataPoint, t time.Time) float64 {
 			best = p.temp
 		}
 		if p.time.After(t) && diff > bestDiff {
-			break // past our point, getting further
+			break
 		}
 	}
 	return best
@@ -602,44 +590,45 @@ func absDuration(d time.Duration) time.Duration {
 	return d
 }
 
-// buildSparkWindow creates a window of HistoryPoints around the cursor
-// position for the sparkline to render.
-func buildSparkWindow(pts []dataPoint, cursorIdx int, width int, timeSlots []time.Time) []HistoryPoint {
+func buildSparkWindow(pts []dataPoint, cursorIdx int, width int, timeSlots []time.Time) []history.Point {
 	if len(pts) == 0 || len(timeSlots) == 0 {
 		return nil
 	}
 
-	// Determine the time window: cursor at the right edge, showing `width` seconds back
 	cursorTime := timeSlots[cursorIdx]
 
-	// Build a time->temp lookup for fast access
 	tempMap := make(map[int64]float64)
 	for _, p := range pts {
 		tempMap[p.time.Unix()] = p.temp
 	}
 
-	// Walk backwards from cursor to fill the window
-	var result []HistoryPoint
+	var result []history.Point
 	for i := width - 1; i >= 0; i-- {
 		slotIdx := cursorIdx - i
-		if slotIdx < 0 {
-			continue
-		}
-		if slotIdx >= len(timeSlots) {
+		if slotIdx < 0 || slotIdx >= len(timeSlots) {
 			continue
 		}
 		t := timeSlots[slotIdx]
 		if temp, ok := tempMap[t.Unix()]; ok {
-			result = append(result, HistoryPoint{Temp: temp, Time: t})
+			result = append(result, history.Point{Temp: temp, Time: t})
 		}
 	}
 
-	// If cursor points to a valid time, make sure we include it
 	if temp, ok := tempMap[cursorTime.Unix()]; ok {
 		if len(result) == 0 || result[len(result)-1].Time != cursorTime {
-			result = append(result, HistoryPoint{Temp: temp, Time: cursorTime})
+			result = append(result, history.Point{Temp: temp, Time: cursorTime})
 		}
 	}
 
 	return result
+}
+
+func truncate(s string, w int) string {
+	if len(s) <= w {
+		return s
+	}
+	if w <= 3 {
+		return s[:w]
+	}
+	return s[:w-1] + "\u2026"
 }

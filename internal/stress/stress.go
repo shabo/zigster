@@ -1,4 +1,6 @@
-package main
+// Package stress provides built-in stress testing for individual hardware
+// components (CPU, GPU, NVMe, disk, WiFi) or all at once.
+package stress
 
 import (
 	"fmt"
@@ -12,8 +14,7 @@ import (
 	"time"
 )
 
-// stressTargets lists what we can stress and how.
-var stressTargets = []struct {
+var targets = []struct {
 	name string
 	desc string
 }{
@@ -25,9 +26,10 @@ var stressTargets = []struct {
 	{"all", "Everything at once"},
 }
 
-func runStress(args []string) {
+// Run dispatches the stress test based on command-line arguments.
+func Run(args []string) {
 	if len(args) == 0 {
-		printStressHelp()
+		printHelp()
 		return
 	}
 
@@ -51,7 +53,6 @@ func runStress(args []string) {
 	fmt.Println("Press Ctrl+C to stop early")
 	fmt.Println()
 
-	// Handle Ctrl+C to kill child processes
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
@@ -70,16 +71,16 @@ func runStress(args []string) {
 		stressAll(durSecs, sigCh)
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown target: %s\n\n", target)
-		printStressHelp()
+		printHelp()
 		os.Exit(1)
 	}
 }
 
-func printStressHelp() {
+func printHelp() {
 	fmt.Println("Usage: sensors stress <target> [duration]")
 	fmt.Println()
 	fmt.Println("Targets:")
-	for _, t := range stressTargets {
+	for _, t := range targets {
 		fmt.Printf("  %-8s  %s\n", t.name, t.desc)
 	}
 	fmt.Println()
@@ -95,7 +96,6 @@ func printStressHelp() {
 
 func stressCPU(secs int, sigCh chan os.Signal) {
 	if !checkTool("stress-ng") {
-		// Fallback: pure Go CPU burn
 		fmt.Println("stress-ng not found, using built-in CPU burner")
 		cpuBurnFallback(secs, sigCh)
 		return
@@ -141,10 +141,8 @@ func cpuBurnFallback(secs int, sigCh chan os.Signal) {
 // ── GPU stress ───────────────────────────────────────────────────────
 
 func stressGPU(secs int, sigCh chan os.Signal) {
-	// Try tools in order of how hard they actually push the GPU
 	fmt.Printf("  GPU stress for %ds\n", secs)
 
-	// 1. glmark2 — real OpenGL rendering benchmark, pushes GPU hard
 	if checkTool("glmark2") {
 		fmt.Println("  glmark2 (OpenGL rendering benchmark)")
 		if os.Getenv("DISPLAY") == "" && os.Getenv("WAYLAND_DISPLAY") == "" {
@@ -154,7 +152,6 @@ func stressGPU(secs int, sigCh chan os.Signal) {
 		return
 	}
 
-	// 2. glxgears — lighter but still GPU rendering
 	if checkTool("glxgears") {
 		fmt.Println("  glxgears (OpenGL rendering)")
 		if os.Getenv("DISPLAY") == "" && os.Getenv("WAYLAND_DISPLAY") == "" {
@@ -164,7 +161,6 @@ func stressGPU(secs int, sigCh chan os.Signal) {
 		return
 	}
 
-	// 3. Fallback: parallel nvidia-smi queries (very light, but something)
 	if checkTool("nvidia-smi") {
 		fmt.Println("  nvidia-smi query loop (light GPU load)")
 		fmt.Println("  tip: install glmark2 for real GPU stress: sudo pacman -S glmark2")
@@ -196,11 +192,10 @@ func stressGPU(secs int, sigCh chan os.Signal) {
 
 func stressNVMe(secs int, sigCh chan os.Signal) {
 	if !checkTool("fio") {
-		fmt.Fprintln(os.Stderr, "  fio not found — install: sudo pacman -S fio")
+		fmt.Fprintln(os.Stderr, "  fio not found -- install: sudo pacman -S fio")
 		return
 	}
 
-	// Find NVMe device
 	dev := findBlockDev("nvme")
 	if dev == "" {
 		fmt.Fprintln(os.Stderr, "  no NVMe device found")
@@ -208,7 +203,7 @@ func stressNVMe(secs int, sigCh chan os.Signal) {
 	}
 
 	fmt.Printf("  fio random read/write on %s for %ds\n", dev, secs)
-	fmt.Println("  (using temp file, safe — no raw device writes)")
+	fmt.Println("  (using temp file, safe -- no raw device writes)")
 
 	tmpDir := "/tmp/sensors-stress-nvme"
 	os.MkdirAll(tmpDir, 0755)
@@ -234,7 +229,7 @@ func stressNVMe(secs int, sigCh chan os.Signal) {
 
 func stressDisk(secs int, sigCh chan os.Signal) {
 	if !checkTool("fio") {
-		fmt.Fprintln(os.Stderr, "  fio not found — install: sudo pacman -S fio")
+		fmt.Fprintln(os.Stderr, "  fio not found -- install: sudo pacman -S fio")
 		return
 	}
 
@@ -263,15 +258,10 @@ func stressDisk(secs int, sigCh chan os.Signal) {
 // ── WiFi / network stress ────────────────────────────────────────────
 
 func stressWifi(secs int, sigCh chan os.Signal) {
-	// Generate network traffic to heat up the WiFi adapter
-	// Use parallel downloads from a reliable source, or ping flood
-
 	fmt.Printf("  Network stress for %ds\n", secs)
 
-	// Try iperf3 to localhost first (self-loop, saturates the NIC)
 	if checkTool("iperf3") {
 		fmt.Println("  iperf3 self-test (loopback stress)")
-		// Start server in background
 		server := exec.Command("iperf3", "-s", "-D", "-1")
 		server.Start()
 		time.Sleep(500 * time.Millisecond)
@@ -280,7 +270,6 @@ func stressWifi(secs int, sigCh chan os.Signal) {
 		return
 	}
 
-	// Fallback: parallel curl / wget downloads or sustained ping
 	fmt.Println("  Sustained ping flood (requires network)")
 	runCmd(sigCh, "ping", "-f", "-c", strconv.Itoa(secs*1000), "-i", "0.001", "1.1.1.1")
 }
@@ -302,7 +291,6 @@ func stressAll(secs int, sigCh chan os.Signal) {
 		{"WiFi", stressWifi},
 	}
 
-	// Create per-job signal channels
 	done := make(chan struct{})
 	go func() {
 		select {
@@ -320,13 +308,13 @@ func stressAll(secs int, sigCh chan os.Signal) {
 			jobSig <- syscall.SIGTERM
 		}()
 		go func() {
-			fmt.Printf("── Starting %s stress ──\n", j.name)
+			fmt.Printf("-- Starting %s stress --\n", j.name)
 			j.fn(secs, jobSig)
 		}()
 	}
 
 	<-done
-	time.Sleep(500 * time.Millisecond) // let children clean up
+	time.Sleep(500 * time.Millisecond)
 	fmt.Println("\n  All stress tests complete")
 }
 
@@ -351,8 +339,6 @@ func findBlockDev(prefix string) string {
 	return ""
 }
 
-// runCmdWithTimeout runs a command that doesn't have its own timeout mechanism.
-// It kills the process after the given duration.
 func runCmdWithTimeout(secs int, sigCh chan os.Signal, name string, args ...string) {
 	cmd := exec.Command(name, args...)
 	cmd.Stdout = os.Stdout
@@ -398,7 +384,6 @@ func runCmd(sigCh chan os.Signal, name string, args ...string) {
 		return
 	}
 
-	// Wait for either the command to finish or a signal
 	cmdDone := make(chan error, 1)
 	go func() {
 		cmdDone <- cmd.Wait()
@@ -407,7 +392,6 @@ func runCmd(sigCh chan os.Signal, name string, args ...string) {
 	select {
 	case err := <-cmdDone:
 		if err != nil {
-			// Exit code 1 from stress tools is normal (timeout)
 			if exitErr, ok := err.(*exec.ExitError); ok {
 				if exitErr.ExitCode() == 1 {
 					fmt.Println("  completed")

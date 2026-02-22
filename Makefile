@@ -1,4 +1,5 @@
 .PHONY: build start stop restart history stress stress-cpu stress-gpu stress-nvme stress-disk stress-wifi stress-all test clean help
+
 .DEFAULT_GOAL := help
 
 BIN      := sensors
@@ -17,7 +18,7 @@ help: ## Show available targets
 	@echo ""
 
 build: ## Build the binary
-	go build -o $(BIN) .
+	go build -o $(BIN) ./cmd/sensors
 
 start: build ## Build and run (foreground, live monitoring)
 	./$(BIN)
