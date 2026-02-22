@@ -125,4 +125,4 @@ My dog was here while I was building this. That's the whole story.
 
 ## License
 
-MIT
+[PolyForm Noncommercial 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0/) -- free to use, modify, and share for any noncommercial purpose. Commercial use is not permitted.
